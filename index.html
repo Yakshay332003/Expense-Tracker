@@ -9,8 +9,8 @@
 <link rel="manifest" href='data:application/manifest+json,{"name":"Trip Expenses","short_name":"Expenses","start_url":".","display":"standalone","background_color":"#eef1ee","theme_color":"#0f5c5c"}'>
 <title>Trip Expenses</title>
 <style>
-:root{--bg:#eef1ee;--card:#fff;--ink:#1b2a2f;--mute:#5d6d70;--line:#d3dbd8;--acc:#0f5c5c;--accink:#fff;--warn:#b3341f}
-@media(prefers-color-scheme:dark){:root{--bg:#121a1b;--card:#1a2527;--ink:#e6eeec;--mute:#93a6a4;--line:#2d3c3e;--acc:#4fb3a9;--accink:#08201e;--warn:#ff8a74}}
+:root{--bg:#eef1ee;--card:#fff;--ink:#1b2a2f;--mute:#5d6d70;--line:#d3dbd8;--acc:#0f5c5c;--accink:#fff;--warn:#b3341f;--note:#fff4cc;--noteink:#5a4600}
+@media(prefers-color-scheme:dark){:root{--bg:#121a1b;--card:#1a2527;--ink:#e6eeec;--mute:#93a6a4;--line:#2d3c3e;--acc:#4fb3a9;--accink:#08201e;--warn:#ff8a74;--note:#4a3f10;--noteink:#ffe8a3}}
 *{box-sizing:border-box}
 html,body{margin:0}
 body{background:var(--bg);color:var(--ink);font:16px/1.45 system-ui,-apple-system,sans-serif;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
@@ -41,6 +41,7 @@ button:disabled{opacity:.5}
 .exp .amt{font-weight:700;text-align:right}
 .exp .files{grid-column:1/-1;font-size:.85rem}
 .exp .files a{margin-right:10px}
+.note{background:var(--note);color:var(--noteink);border-radius:8px;padding:8px 12px;margin:0 0 12px;font-size:.85rem;display:none}
 #toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:8px;display:none;max-width:90%;z-index:9}
 .back{display:inline-block;margin-bottom:6px;text-decoration:none}
 </style>
@@ -52,10 +53,14 @@ button:disabled{opacity:.5}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/dexie/3.2.4/dexie.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.0/tesseract.min.js"></script>
 <script>
 const $ = s => document.querySelector(s);
+const COMPANY = 'Piramal Pharma Solutions';
+if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
 const CATS = ['Travel','Lodging','Hotel Meals','Fuel','Visa','Entertainment','Equipment','Travel Insurance','Wifi charges','Parking','Tolls','Office Supplies','Event Booking'];
-// Fixed category -> reimbursement-form row. Edit here if you want a different mapping.
 const FORM_ROW = {
   'Travel':'AIR/TRAIN','Lodging':'HOTEL STAY','Hotel Meals':'HOTEL MEALS','Fuel':'FUEL','Visa':'VISA',
   'Entertainment':'ENTERTAINMENT','Equipment':'OTHER/EVENT TICKET BOOKING','Travel Insurance':'TRAVEL INSURANCE',
@@ -65,7 +70,14 @@ const FORM_ROW = {
 const FORM_ROWS = ['HOTEL STAY','HOTEL MEALS','AIR/TRAIN','RENTAL/TAXI','MILEAGE REIMBURSEMENT','NUMBER OF MILES','RATE PER MILE',
   'TOLLS','PARKING','ENTERTAINMENT','WIFI CHARGES','FUEL','VISA','OFFICE SUPPLIES','TRAVEL INSURANCE','OTHER/EVENT TICKET BOOKING'];
 const NON_MONEY = ['NUMBER OF MILES','RATE PER MILE'];
-const COMMON_CUR = ['INR','USD','EUR','GBP','AED','SGD','AUD','CAD','JPY','CHF','CNY','HKD','MYR','THB','SAR','QAR','ZAR','NZD'];
+const CURRENCIES = [['INR','Indian Rupee'],['USD','US Dollar'],['EUR','Euro'],['GBP','British Pound'],['AED','UAE Dirham'],['SGD','Singapore Dollar'],
+  ['AUD','Australian Dollar'],['CAD','Canadian Dollar'],['JPY','Japanese Yen'],['CHF','Swiss Franc'],['CNY','Chinese Yuan'],['HKD','Hong Kong Dollar'],
+  ['MYR','Malaysian Ringgit'],['THB','Thai Baht'],['SAR','Saudi Riyal'],['QAR','Qatari Riyal'],['KWD','Kuwaiti Dinar'],['OMR','Omani Rial'],
+  ['BHD','Bahraini Dinar'],['ZAR','South African Rand'],['NZD','New Zealand Dollar'],['SEK','Swedish Krona'],['NOK','Norwegian Krone'],
+  ['DKK','Danish Krone'],['KRW','South Korean Won'],['IDR','Indonesian Rupiah'],['PHP','Philippine Peso'],['VND','Vietnamese Dong'],
+  ['LKR','Sri Lankan Rupee'],['BDT','Bangladeshi Taka'],['NPR','Nepalese Rupee'],['TRY','Turkish Lira'],['BRL','Brazilian Real'],['MXN','Mexican Peso'],
+  ['PLN','Polish Zloty'],['CZK','Czech Koruna'],['HUF','Hungarian Forint'],['RUB','Russian Ruble'],['EGP','Egyptian Pound']];
+const curOpts = sel => CURRENCIES.map(([c, n]) => `<option value="${c}"${c === sel ? ' selected' : ''}>${c} - ${n}</option>`).join('');
 const DAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
 const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
@@ -80,12 +92,11 @@ const today = () => new Date(Date.now() - new Date().getTimezoneOffset() * 6e4).
 const group = (rows, key) => rows.reduce((o, r) => (o[r[key]] = r2((o[r[key]] || 0) + r.base), o), {});
 const toast = m => { const t = $('#toast'); t.textContent = m; t.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => t.style.display = 'none', 4000); };
 
-// Dates are handled as YYYY-MM-DD strings, parsed as UTC so timezones never shift the day.
 const parse = iso => { const [y, m, d] = iso.split('-').map(Number); return new Date(Date.UTC(y, m - 1, d)); };
 const toIso = d => d.toISOString().slice(0, 10);
 const dowOf = iso => parse(iso).getUTCDay();
 const addDays = (iso, n) => { const d = parse(iso); d.setUTCDate(d.getUTCDate() + n); return toIso(d); };
-const weekEnd = iso => addDays(iso, 6 - dowOf(iso));            // Saturday on or after the date
+const weekEnd = iso => addDays(iso, 6 - dowOf(iso));
 const fmt = iso => { const d = parse(iso); return String(d.getUTCDate()).padStart(2, '0') + '-' + MON[d.getUTCMonth()] + '-' + d.getUTCFullYear(); };
 
 async function liveRate(from, to) {
@@ -94,6 +105,82 @@ async function liveRate(from, to) {
   const j = await r.json();
   if (j.result !== 'success' || !j.rates?.[to]) throw new Error(`No live rate for ${from} to ${to}`);
   return { rate: j.rates[to], date: today() };
+}
+
+/* ---------- Receipt reading (PDF text / OCR) and detection ---------- */
+async function pdfText(file) {
+  const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+  let txt = '';
+  for (let i = 1; i <= Math.min(pdf.numPages, 3); i++) {
+    const p = await pdf.getPage(i), c = await p.getTextContent();
+    txt += c.items.map(x => x.str + (x.hasEOL ? '\n' : ' ')).join('') + '\n';
+  }
+  if (txt.replace(/\s/g, '').length > 30) return txt;
+  // scanned PDF: render first page and OCR it
+  const p = await pdf.getPage(1), vp = p.getViewport({ scale: 2 }), cv = document.createElement('canvas');
+  cv.width = vp.width; cv.height = vp.height;
+  await p.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
+  return (await Tesseract.recognize(cv, 'eng')).data.text;
+}
+async function receiptText(file) {
+  if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) return pdfText(file);
+  if (file.type.startsWith('image/')) return (await Tesseract.recognize(file, 'eng')).data.text;
+  return '';
+}
+
+const CAT_WORDS = [
+  ['Lodging', /\b(hotel|room|lodg|resort|inn|stay|check[- ]?in|accommodation|airbnb)\b/i],
+  ['Hotel Meals', /\b(restaurant|cafe|caf\u00e9|meal|food|dining|breakfast|lunch|dinner|biryani|pizza|swiggy|zomato|bar|kitchen)\b/i],
+  ['Travel', /\b(flight|airline|air india|indigo|vistara|boarding|train|irctc|railway|uber|ola|taxi|cab|bus|ticket|pnr)\b/i],
+  ['Fuel', /\b(petrol|diesel|fuel|hpcl|bpcl|iocl|indian oil|shell)\b/i],
+  ['Visa', /\bvisa\b/i],
+  ['Travel Insurance', /\binsurance\b/i],
+  ['Wifi charges', /\b(wi-?fi|internet|data pack)\b/i],
+  ['Parking', /\bparking\b/i],
+  ['Tolls', /\b(toll|fastag)\b/i],
+  ['Office Supplies', /\b(stationery|office suppl|printing|xerox|courier)\b/i],
+  ['Event Booking', /\b(conference|event|registration|exhibition|expo)\b/i],
+  ['Entertainment', /\b(entertainment|movie|show|club|theatre)\b/i],
+  ['Equipment', /\b(equipment|laptop|charger|adapter)\b/i]
+];
+function detect(text) {
+  const out = {}, t = text.replace(/\r/g, '');
+  const lines = t.split('\n').map(s => s.trim()).filter(Boolean);
+
+  // currency: explicit code first, then symbols
+  const codes = CURRENCIES.map(c => c[0]);
+  const hit = t.match(new RegExp('\\b(' + codes.join('|') + ')\\b'));
+  if (hit) out.currency = hit[1];
+  else if (/\u20B9|\bRs\.?\s?\d|\bINR\b/i.test(t)) out.currency = 'INR';
+  else if (/\u20AC/.test(t)) out.currency = 'EUR';
+  else if (/\u00A3/.test(t)) out.currency = 'GBP';
+  else if (/US\$|\$/.test(t)) out.currency = 'USD';
+
+  // amount: largest number on a "total / amount due" style line
+  const num = /\d{1,3}(?:,\d{2,3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?/g;
+  let best = 0;
+  for (const l of lines) if (/(grand\s*total|total\s*(amount|due|payable)?|amount\s*(due|payable|paid)|net\s*(amount|payable)|balance\s*due|bill\s*amount)/i.test(l) && !/sub\s*-?total|tax|gst|vat/i.test(l))
+    for (const m of l.match(num) || []) { const v = parseFloat(m.replace(/,/g, '')); if (v > best && v < 1e8) best = v; }
+  if (best) out.amount = r2(best);
+
+  // date (day-first for numeric formats)
+  const mi = s => MON.findIndex(m => m.toLowerCase() === s.slice(0, 3).toLowerCase());
+  const ok = (y, m, d) => { if (y < 100) y += 2000; const dt = new Date(Date.UTC(y, m, d)); return y > 2000 && y < 2100 && dt.getUTCMonth() === m && dt.getUTCDate() === d ? toIso(dt) : null; };
+  let m;
+  if ((m = t.match(/\b(20\d{2})[-\/.](\d{1,2})[-\/.](\d{1,2})\b/))) out.date = ok(+m[1], m[2] - 1, +m[3]);
+  if (!out.date && (m = t.match(/\b(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})\b/))) out.date = ok(+m[3], m[2] - 1, +m[1]);
+  if (!out.date && (m = t.match(/\b(\d{1,2})(?:st|nd|rd|th)?[\s-]+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[\s,.-]+(\d{2,4})\b/i))) out.date = ok(+m[3], mi(m[2]), +m[1]);
+  if (!out.date && (m = t.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b/i))) out.date = ok(+m[3], mi(m[1]), +m[2]);
+  if (!out.date) delete out.date;
+
+  // category by keywords (first match in priority order)
+  for (const [c, re] of CAT_WORDS) if (re.test(t)) { out.category = c; break; }
+
+  // details: merchant line + invoice number if present
+  const name = lines.find(l => (l.match(/[A-Za-z]/g) || []).length >= 4 && !/^(tax invoice|invoice|receipt|bill|gst|date|page)/i.test(l));
+  const inv = t.match(/(?:invoice|bill|receipt|ref)\s*(?:no\.?|number|#)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9\/-]{3,})/i);
+  if (name) out.details = name.replace(/\s+/g, ' ').slice(0, 70) + (inv ? ' - Inv ' + inv[1] : '');
+  return out;
 }
 
 /* ---------- Home ---------- */
@@ -105,13 +192,12 @@ async function home() {
     return [t, e.reduce((s, x) => s + x.base, 0), e.length];
   }));
   $('#app').innerHTML = `<h1>Trips</h1>
+  <p class="muted small" style="margin-top:-6px">${COMPANY}</p>
   <form id="nt" class="card">
     <label>Trip Hashcode<input name="code" required pattern="[A-Za-z0-9_\\-]{3,32}" placeholder="e.g. A1B2C3D4" autocapitalize="off" autocomplete="off"></label>
-    <div class="row"><label>Company name<input name="company" required value="${esc(last.company)}"></label>
-    <label>Cost center<input name="cc" required value="${esc(last.costCenter)}"></label></div>
-    <div class="row"><label>Employee name<input name="emp" required value="${esc(last.employee)}"></label>
-    <label style="max-width:130px">Report currency<input name="cur" value="${esc(last.currency || 'INR')}" maxlength="3" required list="cl"></label></div>
-    <datalist id="cl">${COMMON_CUR.map(c => `<option>${c}</option>`).join('')}</datalist>
+    <label>Employee name<input name="emp" required value="${esc(last.employee)}"></label>
+    <div class="row"><label>Cost center<input name="cc" required value="${esc(last.costCenter)}"></label>
+    <label>Report currency<select name="cur">${curOpts(last.currency || 'INR')}</select></label></div>
     <button>Start trip</button>
   </form>
   ${rows.length ? '' : '<p class="muted">No trips yet. Enter a Hashcode above to start one.</p>'}
@@ -120,12 +206,11 @@ async function home() {
     <span class="muted small">${esc(t.employee)}</span><span class="muted" style="text-align:right">${n} expenses, ${money(tot, t.currency)}</span></a>`).join('')}`;
   $('#nt').onsubmit = async e => {
     e.preventDefault();
-    const f = new FormData(e.target), code = f.get('code').trim(), cur = f.get('cur').trim().toUpperCase();
-    if (!/^[A-Z]{3}$/.test(cur)) return toast('Currency must be a 3-letter code');
+    const f = new FormData(e.target), code = f.get('code').trim();
     const all = await db.trips.toArray();
     if (all.some(t => t.code.toLowerCase() === code.toLowerCase())) return toast('This Hashcode already exists. Enter a different one.');
     if (!confirm(`Start a trip with Hashcode "${code}"?`)) return;
-    const id = await db.trips.add({ code, currency: cur, company: f.get('company').trim(), employee: f.get('emp').trim(),
+    const id = await db.trips.add({ code, currency: f.get('cur'), company: COMPANY, employee: f.get('emp').trim(),
       costCenter: f.get('cc').trim(), status: 'open', created: today() });
     location.hash = 't' + id;
   };
@@ -143,7 +228,7 @@ async function trip(id) {
   $('#app').innerHTML = `<a class="back" href="#">Back to trips</a>
   <h1>${esc(t.code)}</h1>
   <div class="card">
-    <span class="muted">${open ? 'Open' : 'Closed'} &middot; ${esc(t.employee)} &middot; ${esc(t.company)}</span>
+    <span class="muted">${open ? 'Open' : 'Closed'} &middot; ${esc(t.employee)} &middot; ${COMPANY}</span>
     <div class="total">${money(tot, t.currency)}</div>
     <div class="cats">${Object.entries(group(ex, 'category')).map(([c, v]) => `<span>${esc(c)} ${v.toFixed(2)}</span>`).join('') || '<span class="muted">No expenses yet</span>'}</div>
     ${weeks.length ? `<div class="muted small" style="margin-top:8px">Weeks ending: ${weeks.map(fmt).join(', ')}</div>` : ''}
@@ -155,14 +240,14 @@ async function trip(id) {
     <button id="tog" class="ghost">${open ? 'Mark trip closed' : 'Reopen trip'}</button>
   </div>
   ${open ? `<form id="ef" class="card"><h2>Add expense</h2>
-    <label>Receipt files (PDF, images, Word, Excel; several allowed)
+    <label>Receipt files (PDF or image; details are auto-detected from the first file)
       <input type="file" name="files" multiple accept="application/pdf,image/*,.doc,.docx,.xls,.xlsx"></label>
+    <div id="det" class="note"></div>
     <label>Expense date<input type="date" name="date" value="${today()}" required></label>
     <div id="wkinfo" class="muted small" style="margin:-4px 0 10px"></div>
     <label>Place of travel<input name="place" required></label>
     <div class="row"><label>Amount<input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" required></label>
-      <label>Currency<input name="cur" value="${esc(t.currency)}" maxlength="3" list="cl2" required></label></div>
-    <datalist id="cl2">${COMMON_CUR.map(c => `<option>${c}</option>`).join('')}</datalist>
+      <label>Currency<select name="cur">${curOpts(t.currency)}</select></label></div>
     <div id="fx" class="card" style="display:none;background:var(--bg)">
       <label style="color:var(--ink)"><input type="radio" name="mode" value="live" checked>Fetch live rate</label>
       <label style="color:var(--ink)"><input type="radio" name="mode" value="manual">Enter rate manually</label>
@@ -186,7 +271,7 @@ async function trip(id) {
     const F = $('#ef'), rateMode = () => F.mode.value;
     const upd = () => {
       if (F.date.value) $('#wkinfo').textContent = `${DAYS[dowOf(F.date.value)]}, week ending ${fmt(weekEnd(F.date.value))}`;
-      const cur = F.cur.value.trim().toUpperCase(), diff = /^[A-Z]{3}$/.test(cur) && cur !== t.currency;
+      const cur = F.cur.value, diff = cur !== t.currency;
       $('#fx').style.display = diff ? 'block' : 'none';
       if (!diff) return;
       const live = rateMode() === 'live';
@@ -195,18 +280,43 @@ async function trip(id) {
       const v = r2((+F.amount.value || 0) * (+F.rate.value || 0));
       $('#conv').textContent = F.rate.value ? `${F.amount.value || 0} ${cur} = ${v.toFixed(2)} ${t.currency}` : (live ? 'Tap "Get live rate" (or it is fetched on save).' : 'Enter the rate you want to use.');
     };
-    F.addEventListener('input', e => { if (e.target.name === 'cur' && rateMode() === 'live') F.rate.value = ''; upd(); });
-    F.addEventListener('change', e => { if (e.target.name === 'mode') F.rate.value = ''; upd(); });
+    const curChanged = e => { if (e.target.name === 'cur' && rateMode() === 'live') F.rate.value = ''; upd(); };
+    F.addEventListener('input', curChanged);
+    F.addEventListener('change', e => {
+      if (e.target.name === 'mode') F.rate.value = '';
+      else curChanged(e);
+      if (e.target.name === 'files') autofill();
+    });
     $('#gr').onclick = async () => {
-      const cur = F.cur.value.trim().toUpperCase();
-      try { const r = await liveRate(cur, t.currency); F.rate.value = r.rate; F.dataset.rd = r.date; upd(); }
+      try { const r = await liveRate(F.cur.value, t.currency); F.rate.value = r.rate; F.dataset.rd = r.date; upd(); }
       catch (err) { toast(err.message + '. Check connection, or switch to manual.'); }
     };
+
+    async function autofill() {
+      const file = F.files.files[0], note = $('#det');
+      if (!file) { note.style.display = 'none'; return; }
+      note.style.display = 'block'; note.textContent = 'Reading receipt...';
+      try {
+        const d = detect(await receiptText(file)), got = [];
+        if (d.date) { F.date.value = d.date; got.push('date'); }
+        if (d.amount) { F.amount.value = d.amount; got.push('amount'); }
+        if (d.currency) { F.cur.value = d.currency; F.rate.value = ''; got.push('currency'); }
+        if (d.category && CATS.includes(d.category)) { F.category.value = d.category; got.push('category'); }
+        if (d.details) { F.details.value = d.details; got.push('details'); }
+        upd();
+        note.textContent = got.length
+          ? 'Auto-detected: ' + got.join(', ') + '. Please check them against the receipt. Place of travel must be entered by you.'
+          : 'Could not read details from this file. Please fill the fields manually.';
+      } catch (err) {
+        console.error(err);
+        note.textContent = 'Could not read this file (needs internet for the reader). Please fill the fields manually.';
+      }
+    }
     upd();
+
     F.onsubmit = async e => {
       e.preventDefault();
-      const cur = F.cur.value.trim().toUpperCase(), amount = +F.amount.value;
-      if (!/^[A-Z]{3}$/.test(cur)) return toast('Currency must be a 3-letter code');
+      const cur = F.cur.value, amount = +F.amount.value;
       let rate = 1, rateSource = 'same', rateDate = today();
       if (cur !== t.currency) {
         if (rateMode() === 'live') {
@@ -270,7 +380,7 @@ function weekSheet(wb, t, rows, we) {
   const NF = `"${t.currency}" #,##0.00`, DF = 'dd-mmm-yyyy';
   const GRAY = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFD9D9D9' } };
   const thin = { style:'thin' }, med = { style:'medium' };
-  const L = c => String.fromCharCode(64 + c);                           // 1 -> A
+  const L = c => String.fromCharCode(64 + c);
   const put = (r, c, v, o = {}) => {
     const x = ws.getCell(r, c); x.value = v;
     x.font = { name:'Calibri', size:o.sz || 11, bold:!!o.b };
@@ -294,8 +404,7 @@ function weekSheet(wb, t, rows, we) {
   const dates = rows.map(e => e.date), places = [...new Set(rows.map(e => e.place))];
   const start = addDays(we, -6);
 
-  // ---- Header
-  merge(1, 1, 9); put(1, 1, t.company, { b:true, h:'center' });
+  merge(1, 1, 9); put(1, 1, COMPANY, { b:true, h:'center' });
   merge(2, 1, 9); put(2, 1, 'Expense Report', { b:true, h:'center', sz:14 });
   const info = (r, l1, v1, l2, v2, o1 = {}) => {
     put(r, 1, l1, { b:true, wrap:true }); merge(r, 2, 4); put(r, 2, v1, o1);
@@ -308,7 +417,6 @@ function weekSheet(wb, t, rows, we) {
   ws.getRow(5).height = Math.max(30, Math.ceil(places.join(', ').length / 28) * 15);
   grid(3, 5); box(1, 5);
 
-  // ---- Weekly summary (day totals)
   const byDay = Array(7).fill(0);
   rows.forEach(e => byDay[dowOf(e.date)] = r2(byDay[dowOf(e.date)] + e.base));
   const grand = r2(byDay.reduce((a, b) => a + b, 0));
@@ -320,14 +428,13 @@ function weekSheet(wb, t, rows, we) {
   if (grand) put(10, 9, { formula:'SUM(B10:H10)', result:grand }, { nf:NF, h:'right', b:true });
   grid(8, 10); box(7, 10);
 
-  // ---- Expense categories (only cells with data are filled; nothing is zero-filled)
   const mat = {}; FORM_ROWS.forEach(k => mat[k] = Array(7).fill(0));
   rows.forEach(e => { const k = FORM_ROW[e.category]; if (k) mat[k][dowOf(e.date)] = r2(mat[k][dowOf(e.date)] + e.base); });
   section(12, 'EXPENSE CATEGORY'); dayHeads(13, 'CATEGORY');
   let r = 14; const moneyRows = [];
   FORM_ROWS.forEach(k => {
     put(r, 1, k, { b:true });
-    const money_ = !NON_MONEY.includes(k); if (money_) moneyRows.push(r);
+    if (!NON_MONEY.includes(k)) moneyRows.push(r);
     let sum = 0;
     mat[k].forEach((v, i) => { if (v) { put(r, i + 2, v, { nf:NF, h:'right' }); sum = r2(sum + v); } });
     if (sum) put(r, 9, { formula:`SUM(B${r}:H${r})`, result:sum }, { nf:NF, h:'right', b:true });
@@ -343,7 +450,6 @@ function weekSheet(wb, t, rows, we) {
   if (grand) put(reim, 9, { formula:`I${sub}-I${adv}-I${ded}`, result:grand }, { nf:NF, h:'right', b:true });
   grid(13, reim); box(12, reim);
 
-  // ---- Detailed expenses
   let d = reim + 2;
   section(d, 'DETAILED EXPENSES'); d++;
   const hd = (c1, c2, txt) => { merge(d, c1, c2); for (let c = c1; c <= c2; c++) ws.getCell(d, c).fill = GRAY; put(d, c1, txt, { b:true, h:'center', gray:true }); };
@@ -363,7 +469,6 @@ function weekSheet(wb, t, rows, we) {
   put(d, 9, { formula:`SUM(I${first}:I${d - 1})`, result:grand }, { nf:NF, h:'right', b:true });
   grid(hdr, d); box(hdr - 1, d);
 
-  // ---- Signature
   const s = d + 2;
   merge(s, 1, 4); put(s, 1, 'Signature: ______________________   Date: ____________');
   merge(s, 5, 9); put(s, 5, 'Approval: ______________________   Date: ____________');
@@ -387,8 +492,9 @@ async function buildPdf(t, ex, fl) {
   const tx = (s, x, o = {}) => pg.drawText(clean(s), { x, y, size: o.s || 10, font: o.b ? b : f, color: rgb(.1, .15, .17) });
   const nl = (h = 16) => { y -= h; if (y < 50) { pg = out.addPage([595, 842]); y = 800; } };
 
+  tx(COMPANY, 40, { s: 12, b: 1 }); nl(22);
   tx('Trip ' + t.code, 40, { s: 20, b: 1 }); nl(22);
-  tx(`${t.employee}   ${t.company}   Cost center ${t.costCenter}   Currency ${t.currency}`, 40); nl(22);
+  tx(`${t.employee}   Cost center ${t.costCenter}   Currency ${t.currency}`, 40); nl(22);
   tx('Total ' + money(ex.reduce((s, x) => s + x.base, 0), t.currency), 40, { s: 14, b: 1 }); nl(26);
   tx('Date', 40, { b: 1 }); tx('Place', 105, { b: 1 }); tx('Category', 230, { b: 1 }); tx('Original', 330, { b: 1 }); tx('Amount', 450, { b: 1 }); nl(16);
   for (const e of ex) {
