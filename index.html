@@ -192,7 +192,7 @@ async function home() {
     return [t, e.reduce((s, x) => s + x.base, 0), e.length];
   }));
   $('#app').innerHTML = `<h1>Trips</h1>
-  <p class="muted small" style="margin-top:-6px">${COMPANY}</p>
+  
   <form id="nt" class="card">
     <label>Trip Hashcode<input name="code" required pattern="[A-Za-z0-9_\\-]{3,32}" placeholder="e.g. A1B2C3D4" autocapitalize="off" autocomplete="off"></label>
     <label>Employee name<input name="emp" required value="${esc(last.employee)}"></label>
