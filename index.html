@@ -21,17 +21,19 @@ a{color:var(--acc)}
 .card,.trip,.exp{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin:0 0 12px}
 label{display:block;font-size:.85rem;color:var(--mute);margin:0 0 10px}
 input,select,textarea{display:block;width:100%;margin-top:4px;padding:10px;font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px}
+input[type=radio]{display:inline-block;width:auto;margin:0 6px 0 0}
+input[readonly]{opacity:.75}
 input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 .row{display:flex;gap:10px}.row>*{flex:1;min-width:0}
 button{font:inherit;font-weight:600;padding:11px 16px;border-radius:6px;border:1px solid var(--acc);background:var(--acc);color:var(--accink);cursor:pointer}
 button.ghost{background:transparent;color:var(--acc)}
 button.del{background:transparent;color:var(--warn);border-color:transparent;padding:4px 8px;font-weight:500}
 button:disabled{opacity:.5}
-.bar{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+.bar{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0;align-items:center}
 .trip{display:grid;grid-template-columns:1fr auto;gap:2px 10px;text-decoration:none;color:var(--ink)}
 .trip em{font-style:normal;color:var(--mute);text-align:right}.trip em.open{color:var(--acc)}
 .code{font:600 .85rem ui-monospace,Menlo,monospace;border:1.5px solid var(--acc);color:var(--acc);padding:1px 8px;border-radius:4px;letter-spacing:.08em;display:inline-block}
-.muted{color:var(--mute)}
+.muted{color:var(--mute)}.small{font-size:.85rem}
 .total{font:700 2rem Georgia,serif;margin:4px 0}
 .cats{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .cats span{border:1px solid var(--line);border-radius:99px;padding:2px 10px;font-size:.85rem}
@@ -52,44 +54,80 @@ button:disabled{opacity:.5}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
 <script>
 const $ = s => document.querySelector(s);
-const CATS = ['Travel','Stay','Food','Transport','Fuel','Shopping','Other'];
-const db = new Dexie('tripexp');
-db.version(1).stores({ trips:'++id,code,status', expenses:'++id,tripId,date', files:'++id,tripId,expenseId' });
+const CATS = ['Travel','Lodging','Hotel Meals','Fuel','Visa','Entertainment','Equipment','Travel Insurance','Wifi charges','Parking','Tolls','Office Supplies','Event Booking'];
+// Fixed category -> reimbursement-form row. Edit here if you want a different mapping.
+const FORM_ROW = {
+  'Travel':'AIR/TRAIN','Lodging':'HOTEL STAY','Hotel Meals':'HOTEL MEALS','Fuel':'FUEL','Visa':'VISA',
+  'Entertainment':'ENTERTAINMENT','Equipment':'OTHER/EVENT TICKET BOOKING','Travel Insurance':'TRAVEL INSURANCE',
+  'Wifi charges':'WIFI CHARGES','Parking':'PARKING','Tolls':'TOLLS','Office Supplies':'OFFICE SUPPLIES',
+  'Event Booking':'OTHER/EVENT TICKET BOOKING'
+};
+const FORM_ROWS = ['HOTEL STAY','HOTEL MEALS','AIR/TRAIN','RENTAL/TAXI','MILEAGE REIMBURSEMENT','NUMBER OF MILES','RATE PER MILE',
+  'TOLLS','PARKING','ENTERTAINMENT','WIFI CHARGES','FUEL','VISA','OFFICE SUPPLIES','TRAVEL INSURANCE','OTHER/EVENT TICKET BOOKING'];
+const NON_MONEY = ['NUMBER OF MILES','RATE PER MILE'];
+const COMMON_CUR = ['INR','USD','EUR','GBP','AED','SGD','AUD','CAD','JPY','CHF','CNY','HKD','MYR','THB','SAR','QAR','ZAR','NZD'];
+const DAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
+const db = new Dexie('tripexp2');
+db.version(1).stores({ trips:'++id,code,status', expenses:'++id,tripId,date,weekEnding', files:'++id,tripId,expenseId' });
+
+/* ---------- helpers ---------- */
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const r2 = n => Math.round((+n || 0) * 100) / 100;
 const money = (n, c) => c + ' ' + (+n || 0).toFixed(2);
-const today = () => new Date().toISOString().slice(0, 10);
-const group = (rows, key) => rows.reduce((o, r) => (o[r[key]] = (o[r[key]] || 0) + r.amount, o), {});
-const toast = m => { const t = $('#toast'); t.textContent = m; t.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => t.style.display = 'none', 3500); };
+const today = () => new Date(Date.now() - new Date().getTimezoneOffset() * 6e4).toISOString().slice(0, 10);
+const group = (rows, key) => rows.reduce((o, r) => (o[r[key]] = r2((o[r[key]] || 0) + r.base), o), {});
+const toast = m => { const t = $('#toast'); t.textContent = m; t.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => t.style.display = 'none', 4000); };
 
-async function newTrip(name, currency) {
-  const raw = name + Date.now() + crypto.randomUUID();
-  const h = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(raw));
-  const code = [...new Uint8Array(h)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 8).toUpperCase();
-  return db.trips.add({ code, name, currency, status:'open', created: today() });
+// Dates are handled as YYYY-MM-DD strings, parsed as UTC so timezones never shift the day.
+const parse = iso => { const [y, m, d] = iso.split('-').map(Number); return new Date(Date.UTC(y, m - 1, d)); };
+const toIso = d => d.toISOString().slice(0, 10);
+const dowOf = iso => parse(iso).getUTCDay();
+const addDays = (iso, n) => { const d = parse(iso); d.setUTCDate(d.getUTCDate() + n); return toIso(d); };
+const weekEnd = iso => addDays(iso, 6 - dowOf(iso));            // Saturday on or after the date
+const fmt = iso => { const d = parse(iso); return String(d.getUTCDate()).padStart(2, '0') + '-' + MON[d.getUTCMonth()] + '-' + d.getUTCFullYear(); };
+
+async function liveRate(from, to) {
+  if (from === to) return { rate: 1, date: today() };
+  const r = await fetch(`https://open.er-api.com/v6/latest/${from}`);
+  const j = await r.json();
+  if (j.result !== 'success' || !j.rates?.[to]) throw new Error(`No live rate for ${from} to ${to}`);
+  return { rate: j.rates[to], date: today() };
 }
 
 /* ---------- Home ---------- */
 async function home() {
   const ts = await db.trips.reverse().toArray();
+  const last = ts[0] || {};
   const rows = await Promise.all(ts.map(async t => {
     const e = await db.expenses.where({ tripId: t.id }).toArray();
-    return [t, e.reduce((s, x) => s + x.amount, 0), e.length];
+    return [t, e.reduce((s, x) => s + x.base, 0), e.length];
   }));
   $('#app').innerHTML = `<h1>Trips</h1>
   <form id="nt" class="card">
-    <div class="row"><label>Trip name<input name="name" required placeholder="Goa offsite"></label>
-    <label style="max-width:110px">Currency<input name="cur" value="INR" maxlength="3" required></label></div>
-    <button>Create trip</button>
+    <label>Trip Hashcode<input name="code" required pattern="[A-Za-z0-9_\\-]{3,32}" placeholder="e.g. A1B2C3D4" autocapitalize="off" autocomplete="off"></label>
+    <div class="row"><label>Company name<input name="company" required value="${esc(last.company)}"></label>
+    <label>Cost center<input name="cc" required value="${esc(last.costCenter)}"></label></div>
+    <div class="row"><label>Employee name<input name="emp" required value="${esc(last.employee)}"></label>
+    <label style="max-width:130px">Report currency<input name="cur" value="${esc(last.currency || 'INR')}" maxlength="3" required list="cl"></label></div>
+    <datalist id="cl">${COMMON_CUR.map(c => `<option>${c}</option>`).join('')}</datalist>
+    <button>Start trip</button>
   </form>
-  ${rows.length ? '' : '<p class="muted">No trips yet. Create one above, then add receipts to it.</p>'}
+  ${rows.length ? '' : '<p class="muted">No trips yet. Enter a Hashcode above to start one.</p>'}
   ${rows.map(([t, tot, n]) => `<a class="trip" href="#t${t.id}">
-    <b>${esc(t.name)}</b><em class="${t.status}">${t.status}</em>
-    <span class="code">${t.code}</span><span class="muted" style="text-align:right">${n} receipts, ${money(tot, t.currency)}</span></a>`).join('')}`;
+    <span class="code">${esc(t.code)}</span><em class="${t.status}">${t.status}</em>
+    <span class="muted small">${esc(t.employee)}</span><span class="muted" style="text-align:right">${n} expenses, ${money(tot, t.currency)}</span></a>`).join('')}`;
   $('#nt').onsubmit = async e => {
     e.preventDefault();
-    const f = new FormData(e.target);
-    location.hash = 't' + await newTrip(f.get('name').trim(), f.get('cur').toUpperCase());
+    const f = new FormData(e.target), code = f.get('code').trim(), cur = f.get('cur').trim().toUpperCase();
+    if (!/^[A-Z]{3}$/.test(cur)) return toast('Currency must be a 3-letter code');
+    const all = await db.trips.toArray();
+    if (all.some(t => t.code.toLowerCase() === code.toLowerCase())) return toast('This Hashcode already exists. Enter a different one.');
+    if (!confirm(`Start a trip with Hashcode "${code}"?`)) return;
+    const id = await db.trips.add({ code, currency: cur, company: f.get('company').trim(), employee: f.get('emp').trim(),
+      costCenter: f.get('cc').trim(), status: 'open', created: today() });
+    location.hash = 't' + id;
   };
 }
 
@@ -97,47 +135,100 @@ async function home() {
 async function trip(id) {
   const t = await db.trips.get(id);
   if (!t) return home();
-  const ex = (await db.expenses.where({ tripId: id }).toArray()).sort((a, b) => a.date.localeCompare(b.date));
+  const ex = (await db.expenses.where({ tripId: id }).toArray()).sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id);
   const fl = await db.files.where({ tripId: id }).toArray();
-  const tot = ex.reduce((s, x) => s + x.amount, 0);
+  const tot = r2(ex.reduce((s, x) => s + x.base, 0));
   const open = t.status === 'open';
+  const weeks = [...new Set(ex.map(e => e.weekEnding))].sort();
   $('#app').innerHTML = `<a class="back" href="#">Back to trips</a>
-  <h1>${esc(t.name)}</h1>
+  <h1>${esc(t.code)}</h1>
   <div class="card">
-    <span class="code">${t.code}</span> <span class="muted">${open ? 'Open' : 'Closed'}</span>
+    <span class="muted">${open ? 'Open' : 'Closed'} &middot; ${esc(t.employee)} &middot; ${esc(t.company)}</span>
     <div class="total">${money(tot, t.currency)}</div>
     <div class="cats">${Object.entries(group(ex, 'category')).map(([c, v]) => `<span>${esc(c)} ${v.toFixed(2)}</span>`).join('') || '<span class="muted">No expenses yet</span>'}</div>
+    ${weeks.length ? `<div class="muted small" style="margin-top:8px">Weeks ending: ${weeks.map(fmt).join(', ')}</div>` : ''}
   </div>
   <div class="bar">
-    <button id="pdf">Download PDF</button>
-    <button id="xls" class="ghost">Download Excel</button>
-    <button id="tog" class="ghost">${open ? 'Close trip' : 'Reopen trip'}</button>
+    ${weeks.length > 1 ? `<select id="wk" style="width:auto;margin:0"><option value="all">All weeks (one sheet each)</option>${weeks.map(w => `<option value="${w}">Week ending ${fmt(w)}</option>`).join('')}</select>` : ''}
+    <button id="xls">Download Excel</button>
+    <button id="pdf" class="ghost">Download PDF</button>
+    <button id="tog" class="ghost">${open ? 'Mark trip closed' : 'Reopen trip'}</button>
   </div>
   ${open ? `<form id="ef" class="card"><h2>Add expense</h2>
-    <label>Receipt files (PDF or images, several allowed)
+    <label>Receipt files (PDF, images, Word, Excel; several allowed)
       <input type="file" name="files" multiple accept="application/pdf,image/*,.doc,.docx,.xls,.xlsx"></label>
-    <div class="row"><label>Merchant<input name="merchant" required></label>
-      <label>Date<input type="date" name="date" value="${today()}" required></label></div>
-    <div class="row"><label>Amount<input name="amount" type="number" step="0.01" min="0" inputmode="decimal" required></label>
-      <label>Tax<input name="tax" type="number" step="0.01" min="0" inputmode="decimal"></label></div>
+    <label>Expense date<input type="date" name="date" value="${today()}" required></label>
+    <div id="wkinfo" class="muted small" style="margin:-4px 0 10px"></div>
+    <label>Place of travel<input name="place" required></label>
+    <div class="row"><label>Amount<input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" required></label>
+      <label>Currency<input name="cur" value="${esc(t.currency)}" maxlength="3" list="cl2" required></label></div>
+    <datalist id="cl2">${COMMON_CUR.map(c => `<option>${c}</option>`).join('')}</datalist>
+    <div id="fx" class="card" style="display:none;background:var(--bg)">
+      <label style="color:var(--ink)"><input type="radio" name="mode" value="live" checked>Fetch live rate</label>
+      <label style="color:var(--ink)"><input type="radio" name="mode" value="manual">Enter rate manually</label>
+      <label><span id="fxl"></span><input name="rate" type="number" step="any" min="0" inputmode="decimal" readonly></label>
+      <button type="button" class="ghost" id="gr">Get live rate</button>
+      <div id="conv" class="muted small" style="margin-top:8px"></div>
+    </div>
     <label>Category<select name="category">${CATS.map(c => `<option>${c}</option>`).join('')}</select></label>
-    <label>Notes<textarea name="notes" rows="2"></textarea></label>
-    <button>Save expense</button></form>` : ''}
+    <label>Expense details<textarea name="details" rows="2" required></textarea></label>
+    <button id="sv">Save expense</button></form>` : ''}
   <h2>Expenses</h2>
-  ${ex.length ? '' : '<p class="muted">Nothing here yet. Add a receipt above.</p>'}
-  ${ex.map(e => `<div class="exp"><div><b>${esc(e.merchant)}</b><div class="muted">${e.date}, ${esc(e.category)}${e.notes ? ', ' + esc(e.notes) : ''}</div></div>
-    <div class="amt">${money(e.amount, t.currency)}${open ? `<br><button class="del" data-del="${e.id}">Delete</button>` : ''}</div>
-    <div class="files">${fl.filter(f => f.expenseId === e.id).map(f => `<a target="_blank" href="${URL.createObjectURL(f.blob)}">${esc(f.name)}</a>`).join('')}</div></div>`).join('')}
+  ${ex.length ? '' : '<p class="muted">Nothing here yet.</p>'}
+  ${ex.map(e => `<div class="exp"><div><b>${esc(e.details)}</b>
+    <div class="muted small">${fmt(e.date)} (${e.day}) &middot; Week ending ${fmt(e.weekEnding)}<br>${esc(e.place)} &middot; ${esc(e.category)}</div></div>
+    <div class="amt">${money(e.base, t.currency)}${e.currency !== t.currency ? `<div class="muted small" style="font-weight:400">${money(e.amount, e.currency)} @ ${e.rate} (${e.rateSource})</div>` : ''}
+    ${open ? `<button class="del" data-del="${e.id}">Delete</button>` : ''}</div>
+    <div class="files">${fl.filter(f => f.expenseId === e.id).map(f => `<a target="_blank" href="${URL.createObjectURL(f.blob)}" title="${esc(f.path)}">${esc(f.name)}</a>`).join('')}</div></div>`).join('')}
   <div class="bar"><button id="dt" class="del">Delete this trip</button></div>`;
 
-  if (open) $('#ef').onsubmit = async e => {
-    e.preventDefault();
-    const f = new FormData(e.target), files = [...e.target.files.files];
-    const eid = await db.expenses.add({ tripId: id, merchant: f.get('merchant').trim(), date: f.get('date'),
-      amount: +f.get('amount'), tax: +f.get('tax') || 0, category: f.get('category'), notes: f.get('notes').trim() });
-    for (const x of files) await db.files.add({ tripId: id, expenseId: eid, name: x.name, type: x.type, blob: x });
-    toast('Expense saved'); trip(id);
-  };
+  if (open) {
+    const F = $('#ef'), rateMode = () => F.mode.value;
+    const upd = () => {
+      if (F.date.value) $('#wkinfo').textContent = `${DAYS[dowOf(F.date.value)]}, week ending ${fmt(weekEnd(F.date.value))}`;
+      const cur = F.cur.value.trim().toUpperCase(), diff = /^[A-Z]{3}$/.test(cur) && cur !== t.currency;
+      $('#fx').style.display = diff ? 'block' : 'none';
+      if (!diff) return;
+      const live = rateMode() === 'live';
+      F.rate.readOnly = live; $('#gr').style.display = live ? '' : 'none';
+      $('#fxl').textContent = `Rate: 1 ${cur} = ? ${t.currency}`;
+      const v = r2((+F.amount.value || 0) * (+F.rate.value || 0));
+      $('#conv').textContent = F.rate.value ? `${F.amount.value || 0} ${cur} = ${v.toFixed(2)} ${t.currency}` : (live ? 'Tap "Get live rate" (or it is fetched on save).' : 'Enter the rate you want to use.');
+    };
+    F.addEventListener('input', e => { if (e.target.name === 'cur' && rateMode() === 'live') F.rate.value = ''; upd(); });
+    F.addEventListener('change', e => { if (e.target.name === 'mode') F.rate.value = ''; upd(); });
+    $('#gr').onclick = async () => {
+      const cur = F.cur.value.trim().toUpperCase();
+      try { const r = await liveRate(cur, t.currency); F.rate.value = r.rate; F.dataset.rd = r.date; upd(); }
+      catch (err) { toast(err.message + '. Check connection, or switch to manual.'); }
+    };
+    upd();
+    F.onsubmit = async e => {
+      e.preventDefault();
+      const cur = F.cur.value.trim().toUpperCase(), amount = +F.amount.value;
+      if (!/^[A-Z]{3}$/.test(cur)) return toast('Currency must be a 3-letter code');
+      let rate = 1, rateSource = 'same', rateDate = today();
+      if (cur !== t.currency) {
+        if (rateMode() === 'live') {
+          rateSource = 'live';
+          if (F.rate.value) { rate = +F.rate.value; rateDate = F.dataset.rd || today(); }
+          else try { const r = await liveRate(cur, t.currency); rate = r.rate; rateDate = r.date; }
+          catch (err) { return toast(err.message + '. Switch to manual entry.'); }
+        } else {
+          rate = +F.rate.value; rateSource = 'manual';
+          if (!(rate > 0)) return toast('Enter a valid rate');
+        }
+      }
+      $('#sv').disabled = true;
+      const date = F.date.value, files = [...F.files.files];
+      const eid = await db.expenses.add({ tripId: id, date, day: DAYS[dowOf(date)], weekEnding: weekEnd(date),
+        place: F.place.value.trim(), amount, currency: cur, rate, rateSource, rateDate, base: r2(amount * rate),
+        category: F.category.value, details: F.details.value.trim(), submittedBy: t.employee, logged: today() });
+      for (const x of files) await db.files.add({ tripId: id, expenseId: eid, name: x.name, type: x.type,
+        path: `Expenses/${t.code}/${x.name}`, blob: x });
+      toast('Expense saved'); trip(id);
+    };
+  }
   document.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
     if (!confirm('Delete this expense and its files?')) return;
     await db.files.where({ expenseId: +b.dataset.del }).delete();
@@ -155,18 +246,139 @@ async function trip(id) {
     try { await fn(); } catch (err) { console.error(err); toast('Export failed: ' + err.message); }
     btn.disabled = false; btn.textContent = old;
   };
-  run($('#pdf'), async () => save(await buildPdf(t, ex, fl), `${t.name}-${t.code}.pdf`));
-  run($('#xls'), async () => save(await buildExcel(t, ex), `${t.name}-${t.code}.xlsx`));
+  run($('#xls'), async () => {
+    const sel = $('#wk')?.value || 'all';
+    save(await buildExcel(t, ex, sel === 'all' ? weeks : [sel]), `Expense-Report-${t.code}.xlsx`);
+  });
+  run($('#pdf'), async () => save(await buildPdf(t, ex, fl), `Expenses-${t.code}.pdf`));
 }
 
-/* ---------- Exports ---------- */
+/* ---------- Excel (one reimbursement-form worksheet per Week Ending Date) ---------- */
+async function buildExcel(t, ex, weeks) {
+  const wb = new ExcelJS.Workbook();
+  weeks.forEach(we => weekSheet(wb, t, ex.filter(e => e.weekEnding === we).sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id), we));
+  return new Blob([await wb.xlsx.writeBuffer()], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
+
+function weekSheet(wb, t, rows, we) {
+  const ws = wb.addWorksheet('Week Ending ' + fmt(we));
+  ws.views = [{ showGridLines: false }];
+  ws.pageSetup = { paperSize: 1, orientation: 'portrait', horizontalCentered: true, fitToPage: true, fitToWidth: 1, fitToHeight: 0,
+    margins: { left: .5, right: .5, top: .5, bottom: .5, header: .3, footer: .3 } };
+  [26, 12.5, 12.5, 12.5, 12.5, 12.5, 12.5, 12.5, 15].forEach((w, i) => ws.getColumn(i + 1).width = w);
+
+  const NF = `"${t.currency}" #,##0.00`, DF = 'dd-mmm-yyyy';
+  const GRAY = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFD9D9D9' } };
+  const thin = { style:'thin' }, med = { style:'medium' };
+  const L = c => String.fromCharCode(64 + c);                           // 1 -> A
+  const put = (r, c, v, o = {}) => {
+    const x = ws.getCell(r, c); x.value = v;
+    x.font = { name:'Calibri', size:o.sz || 11, bold:!!o.b };
+    x.alignment = { horizontal:o.h || 'left', vertical:'middle', wrapText:!!o.wrap };
+    if (o.nf) x.numFmt = o.nf; if (o.gray) x.fill = GRAY; return x;
+  };
+  const merge = (r, c1, c2) => c2 > c1 && ws.mergeCells(r, c1, r, c2);
+  const grid = (r1, r2) => { for (let r = r1; r <= r2; r++) for (let c = 1; c <= 9; c++) ws.getCell(r, c).border = { top:thin, left:thin, bottom:thin, right:thin }; };
+  const box = (r1, r2) => {
+    const add = (r, c, k) => { const x = ws.getCell(r, c); x.border = { ...x.border, [k]: med }; };
+    for (let c = 1; c <= 9; c++) { add(r1, c, 'top'); add(r2, c, 'bottom'); }
+    for (let r = r1; r <= r2; r++) { add(r, 1, 'left'); add(r, 9, 'right'); }
+  };
+  const section = (r, title) => { merge(r, 1, 9); for (let c = 1; c <= 9; c++) ws.getCell(r, c).fill = GRAY; put(r, 1, title, { b:true, gray:true }); };
+  const dayHeads = (r, first) => {
+    put(r, 1, first, { b:true, h:'center', gray:true });
+    DAYS.forEach((d, i) => put(r, i + 2, d, { b:true, h:'center', gray:true }));
+    put(r, 9, 'TOTAL', { b:true, h:'center', gray:true });
+  };
+
+  const dates = rows.map(e => e.date), places = [...new Set(rows.map(e => e.place))];
+  const start = addDays(we, -6);
+
+  // ---- Header
+  merge(1, 1, 9); put(1, 1, t.company, { b:true, h:'center' });
+  merge(2, 1, 9); put(2, 1, 'Expense Report', { b:true, h:'center', sz:14 });
+  const info = (r, l1, v1, l2, v2, o1 = {}) => {
+    put(r, 1, l1, { b:true, wrap:true }); merge(r, 2, 4); put(r, 2, v1, o1);
+    put(r, 5, l2, { b:true, wrap:true }); merge(r, 6, 9); put(r, 6, v2, { wrap:true });
+    ws.getRow(r).height = 30;
+  };
+  info(3, 'Employee Name', t.employee, 'Cost Center', t.costCenter);
+  info(4, 'Week Ending Date', parse(we), 'Trip Hashcode', t.code, { nf:DF, h:'left' });
+  info(5, 'Date(s) Of Travel', dates.length ? `${fmt(dates[0])} to ${fmt(dates[dates.length - 1])}` : '', 'Place(s) Of Travel', places.join(', '));
+  ws.getRow(5).height = Math.max(30, Math.ceil(places.join(', ').length / 28) * 15);
+  grid(3, 5); box(1, 5);
+
+  // ---- Weekly summary (day totals)
+  const byDay = Array(7).fill(0);
+  rows.forEach(e => byDay[dowOf(e.date)] = r2(byDay[dowOf(e.date)] + e.base));
+  const grand = r2(byDay.reduce((a, b) => a + b, 0));
+  section(7, 'WEEKLY SUMMARY'); dayHeads(8, '');
+  put(9, 1, 'DATE', { b:true });
+  for (let i = 0; i < 7; i++) put(9, i + 2, parse(addDays(start, i)), { nf:DF, h:'center' });
+  put(10, 1, 'DAY TOTAL', { b:true });
+  byDay.forEach((v, i) => { if (v) put(10, i + 2, v, { nf:NF, h:'right', b:true }); });
+  if (grand) put(10, 9, { formula:'SUM(B10:H10)', result:grand }, { nf:NF, h:'right', b:true });
+  grid(8, 10); box(7, 10);
+
+  // ---- Expense categories (only cells with data are filled; nothing is zero-filled)
+  const mat = {}; FORM_ROWS.forEach(k => mat[k] = Array(7).fill(0));
+  rows.forEach(e => { const k = FORM_ROW[e.category]; if (k) mat[k][dowOf(e.date)] = r2(mat[k][dowOf(e.date)] + e.base); });
+  section(12, 'EXPENSE CATEGORY'); dayHeads(13, 'CATEGORY');
+  let r = 14; const moneyRows = [];
+  FORM_ROWS.forEach(k => {
+    put(r, 1, k, { b:true });
+    const money_ = !NON_MONEY.includes(k); if (money_) moneyRows.push(r);
+    let sum = 0;
+    mat[k].forEach((v, i) => { if (v) { put(r, i + 2, v, { nf:NF, h:'right' }); sum = r2(sum + v); } });
+    if (sum) put(r, 9, { formula:`SUM(B${r}:H${r})`, result:sum }, { nf:NF, h:'right', b:true });
+    r++;
+  });
+  const sub = r, adv = r + 1, ded = r + 2, reim = r + 3;
+  put(sub, 1, 'SUB TOTAL', { b:true });
+  for (let i = 0; i < 7; i++) if (byDay[i]) put(sub, i + 2, { formula:`SUM(${moneyRows.map(x => L(i + 2) + x).join(',')})`, result:byDay[i] }, { nf:NF, h:'right', b:true });
+  if (grand) put(sub, 9, { formula:`SUM(${moneyRows.map(x => 'I' + x).join(',')})`, result:grand }, { nf:NF, h:'right', b:true });
+  put(adv, 1, 'LESS ADVANCES', { b:true }); put(adv, 9, null, { nf:NF, h:'right' });
+  put(ded, 1, 'LESS DEDUCTIONS', { b:true }); put(ded, 9, null, { nf:NF, h:'right' });
+  put(reim, 1, 'REIMBURSEMENT', { b:true });
+  if (grand) put(reim, 9, { formula:`I${sub}-I${adv}-I${ded}`, result:grand }, { nf:NF, h:'right', b:true });
+  grid(13, reim); box(12, reim);
+
+  // ---- Detailed expenses
+  let d = reim + 2;
+  section(d, 'DETAILED EXPENSES'); d++;
+  const hd = (c1, c2, txt) => { merge(d, c1, c2); for (let c = c1; c <= c2; c++) ws.getCell(d, c).fill = GRAY; put(d, c1, txt, { b:true, h:'center', gray:true }); };
+  hd(1, 1, 'DATE'); hd(2, 3, 'EXPENSE TYPE'); hd(4, 8, 'DETAILS'); hd(9, 9, 'TOTAL');
+  const hdr = d; d++;
+  const first = d;
+  rows.forEach(e => {
+    put(d, 1, parse(e.date), { nf:DF, h:'center' });
+    merge(d, 2, 3); put(d, 2, e.category);
+    const txt = `${e.details} (${e.place})` + (e.currency !== t.currency ? ` [${e.currency} ${e.amount.toFixed(2)} @ ${e.rate}]` : '');
+    merge(d, 4, 8); put(d, 4, txt, { wrap:true });
+    put(d, 9, e.base, { nf:NF, h:'right' });
+    ws.getRow(d).height = Math.max(15, Math.ceil(txt.length / 52) * 15);
+    d++;
+  });
+  merge(d, 1, 8); put(d, 1, 'TOTAL', { b:true, h:'right' });
+  put(d, 9, { formula:`SUM(I${first}:I${d - 1})`, result:grand }, { nf:NF, h:'right', b:true });
+  grid(hdr, d); box(hdr - 1, d);
+
+  // ---- Signature
+  const s = d + 2;
+  merge(s, 1, 4); put(s, 1, 'Signature: ______________________   Date: ____________');
+  merge(s, 5, 9); put(s, 5, 'Approval: ______________________   Date: ____________');
+  ws.getRow(s).height = 30;
+
+  for (let rr = 1; rr <= s; rr++) for (let c = 1; c <= 9; c++) { const x = ws.getCell(rr, c); if (!x.font?.name) x.font = { name:'Calibri', size:11 }; }
+}
+
+/* ---------- PDF (summary + merged receipts) ---------- */
 async function toJpeg(blob) {
   const bmp = await createImageBitmap(blob), c = document.createElement('canvas');
   c.width = bmp.width; c.height = bmp.height;
   c.getContext('2d').drawImage(bmp, 0, 0);
   return new Promise(r => c.toBlob(r, 'image/jpeg', .85));
 }
-
 async function buildPdf(t, ex, fl) {
   const { PDFDocument: D, StandardFonts: S, rgb } = PDFLib;
   const out = await D.create(), f = await out.embedFont(S.Helvetica), b = await out.embedFont(S.HelveticaBold);
@@ -175,15 +387,14 @@ async function buildPdf(t, ex, fl) {
   const tx = (s, x, o = {}) => pg.drawText(clean(s), { x, y, size: o.s || 10, font: o.b ? b : f, color: rgb(.1, .15, .17) });
   const nl = (h = 16) => { y -= h; if (y < 50) { pg = out.addPage([595, 842]); y = 800; } };
 
-  tx(t.name, 40, { s: 20, b: 1 }); nl(24);
-  tx(`Trip code ${t.code}    Currency ${t.currency}    Expenses ${ex.length}`, 40); nl(22);
-  tx('Total ' + money(ex.reduce((s, x) => s + x.amount, 0), t.currency), 40, { s: 14, b: 1 }); nl(28);
-  tx('By category', 40, { b: 1 }); nl();
-  for (const [c, v] of Object.entries(group(ex, 'category'))) { tx(c, 40); tx(money(v, t.currency), 200); nl(14); }
-  nl(12);
-  tx('Date', 40, { b: 1 }); tx('Merchant', 110, { b: 1 }); tx('Category', 300, { b: 1 }); tx('Amount', 420, { b: 1 }); nl(16);
-  for (const e of ex) { tx(e.date, 40); tx(e.merchant.slice(0, 34), 110); tx(e.category, 300); tx(money(e.amount, t.currency), 420); nl(14); }
-
+  tx('Trip ' + t.code, 40, { s: 20, b: 1 }); nl(22);
+  tx(`${t.employee}   ${t.company}   Cost center ${t.costCenter}   Currency ${t.currency}`, 40); nl(22);
+  tx('Total ' + money(ex.reduce((s, x) => s + x.base, 0), t.currency), 40, { s: 14, b: 1 }); nl(26);
+  tx('Date', 40, { b: 1 }); tx('Place', 105, { b: 1 }); tx('Category', 230, { b: 1 }); tx('Original', 330, { b: 1 }); tx('Amount', 450, { b: 1 }); nl(16);
+  for (const e of ex) {
+    tx(fmt(e.date), 40); tx(e.place.slice(0, 20), 105); tx(e.category, 230);
+    tx(e.currency !== t.currency ? money(e.amount, e.currency) : '', 330); tx(money(e.base, t.currency), 450); nl(14);
+  }
   const skipped = [];
   for (const e of ex) for (const x of fl.filter(z => z.expenseId === e.id)) {
     try {
@@ -197,7 +408,7 @@ async function buildPdf(t, ex, fl) {
           : await out.embedJpg(await (await toJpeg(x.blob)).arrayBuffer());
         const p = out.addPage([595, 842]), s = Math.min(555 / img.width, 760 / img.height);
         p.drawImage(img, { x: 20, y: 800 - img.height * s, width: img.width * s, height: img.height * s });
-        p.drawText(clean(`${e.date}   ${e.merchant}   ${money(e.amount, t.currency)}`), { x: 20, y: 815, size: 9, font: f });
+        p.drawText(clean(`${fmt(e.date)}   ${e.place}   ${money(e.base, t.currency)}`), { x: 20, y: 815, size: 9, font: f });
       } else skipped.push(x.name);
     } catch (err) { skipped.push(x.name + ' (could not read)'); }
   }
@@ -207,32 +418,6 @@ async function buildPdf(t, ex, fl) {
     skipped.forEach(n => { tx(n, 40); nl(14); });
   }
   return new Blob([await out.save()], { type: 'application/pdf' });
-}
-
-async function buildExcel(t, ex) {
-  const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet('Expenses');
-  ws.columns = [
-    { header:'Date', key:'date', width:12 }, { header:'Merchant', key:'merchant', width:26 },
-    { header:'Category', key:'category', width:14 }, { header:'Amount', key:'amount', width:12 },
-    { header:'Tax', key:'tax', width:10 }, { header:'Notes', key:'notes', width:32 }];
-  ex.forEach(e => ws.addRow(e));
-  ws.addRow({ merchant:'TOTAL', amount:{ formula:`SUM(D2:D${ex.length + 1})` }, tax:{ formula:`SUM(E2:E${ex.length + 1})` } });
-  ws.getRow(1).font = { bold: true }; ws.getRow(ex.length + 2).font = { bold: true };
-  ws.views = [{ state:'frozen', ySplit:1 }];
-  const sheet = (name, label, key) => {
-    const s = wb.addWorksheet(name);
-    s.columns = [{ header: label, width: 18 }, { header: 'Total ' + t.currency, width: 16 }];
-    Object.entries(group(ex, key)).sort().forEach(([k, v]) => s.addRow([k, v]));
-    s.getRow(1).font = { bold: true };
-  };
-  sheet('By Category', 'Category', 'category');
-  sheet('By Day', 'Date', 'date');
-  sheet('By Merchant', 'Merchant', 'merchant');
-  const info = wb.addWorksheet('Trip');
-  info.addRows([['Trip', t.name], ['Code', t.code], ['Currency', t.currency], ['Status', t.status]]);
-  info.getColumn(1).font = { bold: true }; info.getColumn(1).width = 12; info.getColumn(2).width = 28;
-  return new Blob([await wb.xlsx.writeBuffer()], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 }
 
 async function save(blob, name) {
